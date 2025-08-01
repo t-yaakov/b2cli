@@ -1,0 +1,18 @@
+version: '3.8'
+
+services:
+  b2cli-db:
+    image: postgres:16
+    container_name: b2cli-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: b2cli_user
+      POSTGRES_PASSWORD: b2cli_password
+      POSTGRES_DB: b2cli_db
+    ports:
+      - "5433:5432" # Exposing on 5433 to avoid conflict with your existing postgres:14 on 5432
+    volumes:
+      - b2cli-data:/var/lib/postgresql/data
+
+volumes:
+  b2cli-data:
