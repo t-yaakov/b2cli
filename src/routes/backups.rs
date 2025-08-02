@@ -1,6 +1,4 @@
-use crate::db;
-use crate::models::{BackupJob, NewBackupJob, ErrorResponse};
-use crate::AppState;
+use crate::{db, models::{BackupJob, BackupSchedule, ErrorResponse, NewBackupJob, NewBackupSchedule, UpdateBackupJob, UpdateBackupSchedule}, AppState, AppError, backup_worker};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -8,88 +6,7 @@ use axum::{
     Json,
 };
 use uuid::Uuid;
-use crate::backup_worker;
-use std::fmt;
-use std::path::StripPrefixError;
-
-// Custom Error Type
-pub enum AppError {
-    SqlxError(sqlx::Error),
-    BackupError(Box<dyn std::error::Error + Send + Sync>),
-    NotFound(String),
-    InternalServerError(String),
-    SerdeJsonError(serde_json::Error),
-    IoError(std::io::Error),
-    StripPrefixError(StripPrefixError),
-}
-
-// Implement From for sqlx::Error
-impl From<sqlx::Error> for AppError {
-    fn from(err: sqlx::Error) -> AppError {
-        AppError::SqlxError(err)
-    }
-}
-
-// Implement From for Box<dyn std::error::Error>
-impl From<Box<dyn std::error::Error + Send + Sync>> for AppError {
-    fn from(err: Box<dyn std::error::Error + Send + Sync>) -> AppError {
-        AppError::BackupError(err)
-    }
-}
-
-// Implement From for serde_json::Error
-impl From<serde_json::Error> for AppError {
-    fn from(err: serde_json::Error) -> AppError {
-        AppError::SerdeJsonError(err)
-    }
-}
-
-// Implement From for std::io::Error
-impl From<std::io::Error> for AppError {
-    fn from(err: std::io::Error) -> AppError {
-        AppError::IoError(err)
-    }
-}
-
-// Implement From for std::path::StripPrefixError
-impl From<StripPrefixError> for AppError {
-    fn from(err: StripPrefixError) -> AppError {
-        AppError::StripPrefixError(err)
-    }
-}
-
-// Implement Display for AppError
-impl fmt::Display for AppError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            AppError::SqlxError(e) => write!(f, "Database error: {}", e),
-            AppError::BackupError(e) => write!(f, "Backup operation error: {}", e),
-            AppError::NotFound(msg) => write!(f, "Not found: {}", msg),
-            AppError::InternalServerError(msg) => write!(f, "Internal server error: {}", msg),
-            AppError::SerdeJsonError(e) => write!(f, "JSON error: {}", e),
-            AppError::IoError(e) => write!(f, "IO error: {}", e),
-            AppError::StripPrefixError(e) => write!(f, "Path prefix error: {}", e),
-        }
-    }
-}
-
-// Implement IntoResponse for AppError
-impl IntoResponse for AppError {
-    fn into_response(self) -> axum::response::Response {
-        let (status, error_message) = match self {
-            AppError::SqlxError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
-            AppError::BackupError(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Backup operation failed: {}", e)),
-            AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg),
-            AppError::InternalServerError(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
-            AppError::SerdeJsonError(e) => (StatusCode::BAD_REQUEST, format!("Invalid JSON: {}", e)),
-            AppError::IoError(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("IO Error: {}", e)),
-            AppError::StripPrefixError(e) => (StatusCode::INTERNAL_SERVER_ERROR, format!("Path Error: {}", e)),
-        };
-
-        let error_response = ErrorResponse { message: error_message };
-        (status, Json(error_response)).into_response()
-    }
-}
+use tracing::{info, error};
 
 #[utoipa::path(
     post,
@@ -105,7 +22,41 @@ pub async fn create_backup(
     State(state): State<AppState>,
     Json(payload): Json<NewBackupJob>,
 ) -> Result<impl IntoResponse, AppError> {
-    let backup_job = db::create_backup_job(&state.db_pool, &payload).await?;
+    let (backup_job, schedule_opt) = db::create_backup_job(&state.db_pool, &payload).await?;
+
+    if let Some(schedule) = schedule_opt {
+        let db_pool = state.db_pool.clone();
+        let backup_job_id = backup_job.id;
+        let cron_expression = schedule.cron_expression.clone();
+        let schedule_id = schedule.id;
+
+        let job = tokio_cron_scheduler::Job::new_async(cron_expression.as_str(), move |_uuid, _l| {
+            let db_pool = db_pool.clone();
+            Box::pin(async move {
+                info!("Running scheduled backup for job {}", backup_job_id);
+                if let Err(e) = db::update_schedule_last_run(&db_pool, schedule_id, "running").await {
+                    error!("Failed to update schedule status: {}", e);
+                }
+
+                match db::get_backup_job_by_id(&db_pool, backup_job_id).await {
+                    Ok(Some(job)) => {
+                        if let Err(e) = backup_worker::perform_backup(&db_pool, &job).await {
+                            error!("Backup job {} failed: {}", backup_job_id, e);
+                        }
+                    }
+                    Ok(None) => error!("Backup job {} not found for scheduled run", backup_job_id),
+                    Err(e) => error!("Failed to get backup job {}: {}", backup_job_id, e),
+                }
+
+                if let Err(e) = db::update_schedule_last_run(&db_pool, schedule_id, "completed").await {
+                    error!("Failed to update schedule status: {}", e);
+                }
+            })
+        })?;
+
+        state.scheduler.add(job).await?;
+    }
+
     Ok((StatusCode::CREATED, Json(backup_job)))
 }
 
@@ -133,7 +84,10 @@ pub async fn run_backup(
             backup_worker::perform_backup(&state.db_pool, &job).await?;
             Ok(StatusCode::OK)
         }
-        None => Err(AppError::NotFound(format!("Backup job with ID {} not found", id.to_string()))),
+        None => Err(AppError::NotFound(format!(
+            "Backup job with ID {} not found",
+            id
+        ))),
     }
 }
 
@@ -172,7 +126,10 @@ pub async fn get_backup(
 
     match job {
         Some(job) => Ok((StatusCode::OK, Json(job))),
-        None => Err(AppError::NotFound(format!("Backup job with ID {} not found", id.to_string()))),
+        None => Err(AppError::NotFound(format!(
+            "Backup job with ID {} not found",
+            id
+        ))),
     }
 }
 
@@ -196,8 +153,229 @@ pub async fn delete_backup(
     let rows_affected = db::delete_backup_job(&state.db_pool, id).await?;
 
     if rows_affected == 0 {
-        Err(AppError::NotFound(format!("Backup job with ID {} not found", id.to_string())))
+        Err(AppError::NotFound(format!(
+            "Backup job with ID {} not found",
+            id
+        )))
     } else {
         Ok(StatusCode::NO_CONTENT)
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/backups/{id}",
+    tag = "Backups",
+    params(
+        ("id" = Uuid, Path, description = "Backup Job ID")
+    ),
+    request_body(content = NewBackupJob, description = "Updated backup job details", example = json!({ "name": "Updated Backup", "mappings": { "/home/user/docs": ["/mnt/backups/updated"] } })),
+    responses(
+        (status = 200, description = "Backup job updated successfully", body = BackupJob),
+        (status = 404, description = "Backup job not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+pub async fn update_backup(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<NewBackupJob>,
+) -> Result<impl IntoResponse, AppError> {
+    let updated_job = db::update_backup_job(&state.db_pool, id, &payload).await?;
+
+    match updated_job {
+        Some(job) => Ok((StatusCode::OK, Json(job))),
+        None => Err(AppError::NotFound(format!("Backup job with ID {} not found", id))),
+    }
+}
+
+// Schedule endpoints
+#[utoipa::path(
+    post,
+    path = "/backups/{id}/schedule",
+    tag = "Backups",
+    params(
+        ("id" = Uuid, Path, description = "Backup Job ID")
+    ),
+    request_body(content = NewBackupSchedule, description = "Schedule configuration", example = json!({ "name": "Daily backup", "cron_expression": "0 17 * * *", "enabled": true })),
+    responses(
+        (status = 201, description = "Schedule created successfully", body = BackupSchedule),
+        (status = 404, description = "Backup job not found", body = ErrorResponse),
+        (status = 409, description = "Schedule already exists for this job", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+pub async fn create_schedule(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<NewBackupSchedule>,
+) -> Result<impl IntoResponse, AppError> {
+    // Check if backup job exists
+    let job = db::get_backup_job_by_id(&state.db_pool, id).await?;
+    if job.is_none() {
+        return Err(AppError::NotFound(format!(
+            "Backup job with ID {} not found",
+            id
+        )));
+    }
+
+    // Check if schedule already exists
+    let existing = db::get_backup_schedule_by_job_id(&state.db_pool, id).await?;
+    if existing.is_some() {
+        return Err(AppError::Conflict(
+            "Schedule already exists for this backup job. Delete the existing schedule first."
+                .to_string(),
+        ));
+    }
+
+    let schedule = db::create_backup_schedule(&state.db_pool, id, &payload).await?;
+    Ok((StatusCode::CREATED, Json(schedule)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/backups/{id}/schedule",
+    tag = "Backups",
+    params(
+        ("id" = Uuid, Path, description = "Backup Job ID")
+    ),
+    responses(
+        (status = 200, description = "Schedule details", body = BackupSchedule),
+        (status = 404, description = "Schedule not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+pub async fn get_schedule(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    let schedule = db::get_backup_schedule_by_job_id(&state.db_pool, id).await?;
+
+    match schedule {
+        Some(schedule) => Ok((StatusCode::OK, Json(schedule))),
+        None => Err(AppError::NotFound(format!(
+            "No schedule found for backup job {}",
+            id
+        ))),
+    }
+}
+
+#[utoipa::path(
+    delete,
+    path = "/backups/{id}/schedule",
+    tag = "Backups",
+    params(
+        ("id" = Uuid, Path, description = "Backup Job ID")
+    ),
+    responses(
+        (status = 204, description = "Schedule deleted successfully"),
+        (status = 404, description = "Schedule not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+pub async fn delete_schedule(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+) -> Result<impl IntoResponse, AppError> {
+    let rows_affected = db::delete_backup_schedule(&state.db_pool, id).await?;
+
+    if rows_affected == 0 {
+        Err(AppError::NotFound(format!(
+            "No schedule found for backup job {}",
+            id
+        )))
+    } else {
+        Ok(StatusCode::NO_CONTENT)
+    }
+}
+
+#[utoipa::path(
+    put,
+    path = "/backups/{id}/schedule",
+    tag = "Backups",
+    params(
+        ("id" = Uuid, Path, description = "Backup Job ID")
+    ),
+    request_body(content = NewBackupSchedule, description = "Updated schedule configuration", example = json!({ "name": "Updated Schedule", "cron_expression": "0 18 * * *", "enabled": false })),
+    responses(
+        (status = 200, description = "Schedule updated successfully", body = BackupSchedule),
+        (status = 404, description = "Schedule not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+pub async fn update_schedule(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<NewBackupSchedule>,
+) -> Result<impl IntoResponse, AppError> {
+    let updated_schedule = db::update_backup_schedule(&state.db_pool, id, &payload).await?;
+
+    match updated_schedule {
+        Some(schedule) => Ok((StatusCode::OK, Json(schedule))),
+        None => Err(AppError::NotFound(format!(
+            "No schedule found for backup job {}",
+            id
+        ))),
+    }
+}
+
+// PATCH endpoints for partial updates
+#[utoipa::path(
+    patch,
+    path = "/backups/{id}",
+    tag = "Backups",
+    params(
+        ("id" = Uuid, Path, description = "Backup Job ID")
+    ),
+    request_body(content = UpdateBackupJob, description = "Partial backup job update", example = json!({ "name": "Updated Name Only" })),
+    responses(
+        (status = 200, description = "Backup job updated successfully", body = BackupJob),
+        (status = 404, description = "Backup job not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+pub async fn patch_backup(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateBackupJob>,
+) -> Result<impl IntoResponse, AppError> {
+    let updated_job = db::patch_backup_job(&state.db_pool, id, &payload).await?;
+
+    match updated_job {
+        Some(job) => Ok((StatusCode::OK, Json(job))),
+        None => Err(AppError::NotFound(format!(
+            "Backup job with ID {} not found",
+            id
+        ))),
+    }
+}
+
+#[utoipa::path(
+    patch,
+    path = "/backups/{id}/schedule",
+    tag = "Backups",
+    params(
+        ("id" = Uuid, Path, description = "Backup Job ID")
+    ),
+    request_body(content = UpdateBackupSchedule, description = "Partial schedule update", example = json!({ "enabled": false })),
+    responses(
+        (status = 200, description = "Schedule updated successfully", body = BackupSchedule),
+        (status = 404, description = "Schedule not found", body = ErrorResponse),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+pub async fn patch_schedule(
+    State(state): State<AppState>,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateBackupSchedule>,
+) -> Result<impl IntoResponse, AppError> {
+    let updated_schedule = db::patch_backup_schedule(&state.db_pool, id, &payload).await?;
+
+    match updated_schedule {
+        Some(schedule) => Ok((StatusCode::OK, Json(schedule))),
+        None => Err(AppError::NotFound(format!(
+            "No schedule found for backup job {}",
+            id
+        ))),
     }
 }

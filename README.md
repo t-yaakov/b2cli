@@ -83,13 +83,30 @@ A API estará disponível em `http://localhost:3000`
 
 ### Principais Endpoints
 
-- `POST /backups` - Criar novo job de backup
-- `GET /backups` - Listar jobs de backup ativos
-- `GET /backups/{id}` - Obter detalhes de um job
-- `DELETE /backups/{id}` - Deletar um job (soft delete)
+- `POST /backups` - Criar nova tarefa de backup
+- `GET /backups` - Listar tarefas de backup ativas
+- `GET /backups/{id}` - Obter detalhes de uma tarefa
+- `DELETE /backups/{id}` - Deletar uma tarefa (soft delete)
 - `POST /backups/{id}/run` - Executar um backup
 
-### Exemplo de Criação de Backup
+### Exemplo de Criação de Backup com Agendamento
+
+```json
+POST /backups
+{
+  "name": "Backup de Documentos",
+  "mappings": {
+    "/home/user/Documents": [
+      "/mnt/backup/docs",
+      "/mnt/external/backup"
+    ]
+  },
+  "schedule": {
+    "name": "Daily at 5 PM",
+    "cron_expression": "0 17 * * *"
+  }
+}
+```
 
 ```json
 POST /backups
@@ -213,19 +230,6 @@ Veja [ROADMAP.md](ROADMAP.md) para o progresso detalhado e próximos passos, inc
 - Interface web
 - Agendamento automático
 
-## 🤝 Contribuindo
-
-1. Fork o projeto
-2. Crie sua feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit suas mudanças (`git commit -m 'Add amazing feature'`)
-4. Push para a branch (`git push origin feature/amazing-feature`)
-5. Abra um Pull Request
-
 ## 📄 Licença
 
 Este projeto está sob a licença MIT. Veja o arquivo [LICENSE](LICENSE) para mais detalhes.
-
-## 📞 Suporte
-
-- Issues: [GitHub Issues](https://github.com/seu-usuario/b2cli/issues)
-- Documentação: [Wiki](https://github.com/seu-usuario/b2cli/wiki)

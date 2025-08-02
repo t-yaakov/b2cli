@@ -1,4 +1,4 @@
-use crate::routes::backups::AppError;
+use crate::AppError;
 use crate::models::{BackupJob, BackedUpFile};
 use sqlx::PgPool;
 use std::path::{Path, PathBuf};

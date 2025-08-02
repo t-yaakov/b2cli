@@ -27,6 +27,7 @@ pub struct BackupJob {
 // A version of BackupJob for creating new entries, without the ID
 #[derive(Deserialize, ToSchema)]
 pub struct NewBackupJob {
+    pub schedule: Option<NewBackupSchedule>,
     pub name: String,
     pub mappings: HashMap<String, Vec<String>>,
 }
@@ -49,4 +50,47 @@ pub struct BackedUpFile {
     pub checksum: String,
     #[serde(skip_deserializing)]
     pub backed_up_at: DateTime<Utc>,
+}
+
+#[derive(Serialize, Deserialize, ToSchema, Debug, FromRow)]
+pub struct BackupSchedule {
+    #[serde(skip_deserializing)]
+    pub id: Uuid,
+    pub backup_job_id: Uuid,
+    pub name: String,
+    pub cron_expression: String,
+    pub enabled: bool,
+    #[serde(skip_deserializing)]
+    pub next_run: Option<DateTime<Utc>>,
+    #[serde(skip_deserializing)]
+    pub last_run: Option<DateTime<Utc>>,
+    #[serde(skip_deserializing)]
+    pub last_status: String,
+    #[serde(skip_deserializing)]
+    pub created_at: DateTime<Utc>,
+    #[serde(skip_deserializing)]
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct NewBackupSchedule {
+    pub name: String,
+    #[schema(example = "0 17 * * *")]
+    pub cron_expression: String,
+    pub enabled: Option<bool>,
+}
+
+// Update models for PATCH operations
+#[derive(Deserialize, ToSchema)]
+pub struct UpdateBackupJob {
+    pub name: Option<String>,
+    pub mappings: Option<HashMap<String, Vec<String>>>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct UpdateBackupSchedule {
+    pub name: Option<String>,
+    #[schema(example = "0 18 * * *")]
+    pub cron_expression: Option<String>,
+    pub enabled: Option<bool>,
 }

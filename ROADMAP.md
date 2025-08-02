@@ -63,6 +63,28 @@
     - [ ] Certificação de backup confiável
     - [ ] API para status de confiabilidade
 
+- [ ] **2.4: Sistema de Agendamento Integrado (EM TESTES)**
+    - [ ] Scheduler interno com tokio-cron-scheduler
+    - [ ] Endpoints para gerenciar agendamentos (POST/PUT/DELETE/GET)
+    - [ ] Suporte a cron expressions padrão
+    - [ ] Agendamento cross-platform (Windows, Linux, macOS)
+
+- [ ] **2.5: Configuração via Arquivos TOML (Infrastructure as Code)** 🆕
+    - [ ] Parser TOML com serde para configurações
+    - [ ] Comando `b2cli apply -f config.toml` para aplicar configurações
+    - [ ] Export/Import de configurações (TOML ↔ JSON)
+    - [ ] Templates predefinidos por setor (healthcare, finance, etc.)
+    - [ ] Validação de configuração antes de aplicar
+    - [ ] Sincronização bidirecional TOML ↔ Banco de Dados
+
+- [ ] **2.6: Sistema de Exclusão (.b2ignore)** 🆕
+    - [ ] Parser de arquivos .b2ignore (sintaxe compatível com gitignore)
+    - [ ] Suporte a padrões glob avançados (**, *, ?, [])
+    - [ ] Templates pré-definidos por linguagem (Python, Rust, Node.js, etc.)
+    - [ ] Exclusão por tamanho de arquivo e idade
+    - [ ] API para gerenciar regras de exclusão
+    - [ ] Relatório de arquivos excluídos e espaço economizado
+
 **Diferencial Técnico:** Outros dizem "backup feito", nós dizemos "backup + restore verificado"
 
 ---
@@ -244,10 +266,11 @@
 - [ ] Testes de integridade via checksum
 - [ ] Métricas básicas de confiabilidade
 
-### Semanas 5-8: Milestone 2.2
+### Semanas 5-8: Milestone 2.2 + 2.4
 - [ ] Sampling inteligente para restore
 - [ ] Alertas para falhas de restore
-- [ ] APIs de status de confiabilidade
+- [ ] Sistema de agendamento com tokio-cron-scheduler
+- [ ] Endpoints de agendamento na API
 
 ### Semanas 9-12: Milestone 2.3 + 3.1
 - [ ] Dashboard de confiabilidade

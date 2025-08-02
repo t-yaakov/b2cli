@@ -20,3 +20,4 @@ utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json", "time", "local-time"] }
 tracing-appender = "0.2"
+tokio-cron-scheduler = "0.14.0"
