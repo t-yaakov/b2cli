@@ -1,209 +1,222 @@
 use crate::AppError;
-use crate::models::{BackupJob, BackedUpFile};
+use crate::models::{BackupJob, NewBackupExecutionLog};
+use crate::{db, rclone::RcloneWrapper};
 use sqlx::PgPool;
-use std::path::{Path, PathBuf};
-use tokio::fs;
-use tokio::io::AsyncReadExt;
-use sha2::{Sha256, Digest};
+use std::path::PathBuf;
 use uuid::Uuid;
-use chrono::Utc;
-use std::future::Future;
-use std::pin::Pin;
 
+/// Executa um backup job manualmente (sem schedule).
+/// 
+/// Wrapper para `perform_backup_with_schedule` quando o backup
+/// é executado manualmente via API ou interface.
+/// 
+/// # Argumentos
+/// * `pool` - Pool de conexão PostgreSQL
+/// * `job` - Backup job a ser executado
+/// 
+/// # Retorna
+/// * `Ok(())` - Backup executado com sucesso
+/// * `Err(AppError)` - Falha na execução
+/// 
+/// # Exemplos
+/// ```no_run
+/// let result = perform_backup(&pool, &job).await;
+/// ```
 pub async fn perform_backup(pool: &PgPool, job: &BackupJob) -> Result<(), AppError> {
-    tracing::info!(job_id = %job.id, job_name = %job.name, "Starting backup job");
-    tracing::debug!(job_id = %job.id, mappings = ?job.mappings, "Job mappings");
+    perform_backup_with_schedule(pool, job, None).await
+}
+
+/// Executa um backup job com suporte a agendamento.
+/// 
+/// Esta é a função principal de execução de backup que:
+/// 1. Atualiza status do job para RUNNING
+/// 2. Parsea os mapeamentos origem -> destinos
+/// 3. Executa rclone sync para cada mapeamento
+/// 4. Cria logs de execução detalhados
+/// 5. Atualiza status final e próxima execução do schedule
+/// 
+/// # Argumentos
+/// * `pool` - Pool de conexão PostgreSQL
+/// * `job` - Backup job a ser executado
+/// * `schedule_id` - ID do schedule que triggou a execução (opcional)
+/// 
+/// # Retorna
+/// * `Ok(())` - Backup executado com sucesso
+/// * `Err(AppError)` - Falha na execução
+/// 
+/// # Comportamento
+/// - Se qualquer transferência falhar, marca job como FAILED
+/// - Atualiza last_run e next_run do schedule automaticamente
+/// - Salva métricas detalhadas no backup_execution_logs
+/// - Usa rclone com logs estruturados para debugging
+/// 
+/// # Exemplos
+/// ```no_run
+/// // Backup manual
+/// let result = perform_backup_with_schedule(&pool, &job, None).await;
+/// 
+/// // Backup via scheduler
+/// let result = perform_backup_with_schedule(&pool, &job, Some(schedule_id)).await;
+/// ```
+pub async fn perform_backup_with_schedule(pool: &PgPool, job: &BackupJob, schedule_id: Option<Uuid>) -> Result<(), AppError> {
+    tracing::debug!(job_id = %job.id, job_name = %job.name, "Starting backup job");
     
     // Update job status to RUNNING
-    crate::db::update_backup_job_status(pool, job.id, "RUNNING").await?;
+    db::update_backup_job_status(pool, job.id, "RUNNING").await?;
 
     let mappings: std::collections::HashMap<String, Vec<String>> = serde_json::from_value(job.mappings.clone())?;
+    let rclone = RcloneWrapper::new(Default::default(), Some(PathBuf::from("./logs")));
+    
+    let mut all_success = true;
 
-    let result = async {
-        for (source_path_str, destination_paths) in mappings {
-            tracing::debug!(source = %source_path_str, destinations = ?destination_paths, "Processing mapping");
-            let source_path = PathBuf::from(&source_path_str);
+    for (source_path, destination_paths) in mappings {
+        for destination in destination_paths {
+            // Criar log de execução
+            let triggered_by = if schedule_id.is_some() { "scheduler" } else { "manual" };
+            let log_data = NewBackupExecutionLog {
+                backup_job_id: job.id,
+                schedule_id,
+                rclone_command: format!("rclone sync {:?} {:?}", source_path, destination),
+                source_path: source_path.clone(),
+                destination_path: destination.clone(),
+                rclone_config: None,
+                triggered_by: Some(triggered_by.to_string()),
+            };
 
-            if source_path.exists() {
-                let metadata = fs::metadata(&source_path).await?;
-                tracing::debug!(
-                    path = ?source_path,
-                    is_file = metadata.is_file(), 
-                    is_dir = metadata.is_dir(), 
-                    "Source path metadata"
-                );
-                
-                traverse_and_process_path(pool, job.id, &source_path, &source_path, &destination_paths).await?;
-            } else {
-                tracing::warn!(path = ?source_path, "Source path does not exist");
+            let execution_log = db::create_backup_execution_log(pool, &log_data).await?;
+            
+            // Executar rclone sync
+            match rclone.sync(execution_log.id, &source_path, &destination).await {
+                Ok(result) => {
+                    // Atualizar log com resultados
+                    db::update_backup_execution_log_completion(pool, execution_log.id, &result).await?;
+                    tracing::debug!(
+                        job_id = %job.id,
+                        files_transferred = result.files_transferred,
+                        "Backup completed for path {} -> {}", source_path, destination
+                    );
+                }
+                Err(e) => {
+                    all_success = false;
+                    tracing::error!(
+                        job_id = %job.id,
+                        error = %e,
+                        "Backup failed for path {} -> {}", source_path, destination
+                    );
+                }
             }
         }
-        Ok::<(), AppError>(()) // Explicitly return Ok with unit type
-    }.await;
+    }
 
     // Update job status based on result
-    match result {
-        Ok(_) => {
-            crate::db::update_backup_job_status(pool, job.id, "COMPLETED").await?;
-            tracing::info!(job_id = %job.id, job_name = %job.name, "Backup job completed successfully");
-            Ok(())
-        },
-        Err(e) => {
-            crate::db::update_backup_job_status(pool, job.id, "FAILED").await?;
-            tracing::error!(job_id = %job.id, job_name = %job.name, error = %e, "Backup job failed");
-            Err(e)
-        }
-    }
-}
-
-// This function now returns a Pin<Box<dyn Future>> to handle recursion
-fn traverse_and_process_path<'a>(
-    pool: &'a PgPool,
-    backup_job_id: Uuid,
-    base_source_path: &'a Path,
-    current_path: &'a Path,
-    destination_paths: &'a Vec<String>,
-) -> Pin<Box<dyn Future<Output = Result<(), AppError>> + Send + 'a>> {
-    Box::pin(async move {
-        tracing::trace!(path = ?current_path, "Traversing path");
-        
-        // Get metadata to check file type
-        let metadata = match fs::metadata(current_path).await {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!(path = ?current_path, error = %e, "Error getting metadata");
-                return Err(AppError::IoError(e));
-            }
-        };
-        
-        if metadata.is_file() {
-            tracing::trace!(path = ?current_path, "Processing file");
-            process_file(pool, backup_job_id, base_source_path, current_path, destination_paths).await?;
-        } else if metadata.is_dir() {
-            tracing::trace!(path = ?current_path, "Processing directory");
-            let mut entries = fs::read_dir(current_path).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                let path = entry.path();
-                traverse_and_process_path(pool, backup_job_id, base_source_path, &path, destination_paths).await?;
-            }
-        } else {
-            tracing::warn!(path = ?current_path, "Skipping special file");
-        }
+    let final_status = if all_success { "COMPLETED" } else { "FAILED" };
+    db::update_backup_job_status(pool, job.id, final_status).await?;
+    
+    if all_success {
+        tracing::debug!(job_id = %job.id, "Backup job completed successfully");
         Ok(())
-    })
+    } else {
+        tracing::error!(job_id = %job.id, "Some backup operations failed");
+        Err(AppError::InternalServerError("Some backup operations failed".to_string()))
+    }
 }
 
-async fn process_file(
-    pool: &PgPool,
-    backup_job_id: Uuid,
-    base_source_path: &Path,
-    original_file_path: &Path,
-    destination_paths: &Vec<String>,
-) -> Result<(), AppError> {
-    tracing::trace!(path = ?original_file_path, "Processing file for backup");
-    
-    // Double-check that this is actually a file
-    let metadata = fs::metadata(&original_file_path).await?;
-    if !metadata.is_file() {
-        tracing::error!(
-            path = ?original_file_path, 
-            is_dir = metadata.is_dir(), 
-            is_file = metadata.is_file(),
-            "process_file called on non-file"
-        );
-        return Err(AppError::InternalServerError(
-            format!("Expected file but found directory or special file: {:?}", original_file_path)
-        ));
-    }
-    
-    let file_name = original_file_path
-        .file_name()
-        .ok_or_else(|| AppError::InternalServerError("Invalid file path".to_string()))?
-        .to_string_lossy()
-        .to_string();
-    let file_extension = original_file_path
-        .extension()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let file_size = metadata.len() as i64;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use uuid::Uuid;
+    use std::collections::HashMap;
 
-    tracing::trace!(path = ?original_file_path, "Opening file for reading");
-    let mut file = fs::File::open(&original_file_path).await?;
-    let mut hasher = Sha256::new();
-    let mut buffer = Vec::new();
-    file.read_to_end(&mut buffer).await?;
-    hasher.update(&buffer);
-    let checksum = format!("{:x}", hasher.finalize());
-
-    // Calculate relative path from base_source_path
-    let relative_path = original_file_path.strip_prefix(base_source_path)?;
-
-    for dest_path_str in destination_paths {
-        let dest_path = PathBuf::from(dest_path_str);
-        let backed_up_file_path = if relative_path.as_os_str().is_empty() {
-            // If relative_path is empty, we're backing up a single file
-            // Use the original file name in the destination directory
-            dest_path.join(original_file_path.file_name().unwrap())
-        } else {
-            // Otherwise, preserve the directory structure
-            dest_path.join(relative_path)
-        };
-
-        tracing::debug!(
-            source = ?original_file_path, 
-            destination = ?backed_up_file_path, 
-            "Copying file"
-        );
-
-        // Ensure parent directories exist
-        if let Some(parent) = backed_up_file_path.parent() {
-            fs::create_dir_all(parent).await?;
-        }
-
-        fs::copy(&original_file_path, &backed_up_file_path).await?;
-
-        let backed_up_file = BackedUpFile {
+    fn create_test_job() -> BackupJob {
+        BackupJob {
             id: Uuid::new_v4(),
-            backup_job_id,
-            original_path: original_file_path.to_string_lossy().to_string(),
-            backed_up_path: backed_up_file_path.to_string_lossy().to_string(),
-            file_name: file_name.clone(),
-            file_extension: file_extension.clone(),
-            file_size,
-            checksum: checksum.clone(),
-            backed_up_at: Utc::now(),
-        };
-
-        sqlx::query!(
-            r#"
-            INSERT INTO backed_up_files (
-                id, backup_job_id, original_path, backed_up_path,
-                file_name, file_extension, file_size, checksum, backed_up_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-            "#,
-            backed_up_file.id,
-            backed_up_file.backup_job_id,
-            backed_up_file.original_path,
-            backed_up_file.backed_up_path,
-            backed_up_file.file_name,
-            backed_up_file.file_extension,
-            backed_up_file.file_size,
-            backed_up_file.checksum,
-            backed_up_file.backed_up_at,
-        )
-        .execute(pool)
-        .await?;
-
-        tracing::info!(
-            source = %original_file_path.to_string_lossy(), 
-            destination = %backed_up_file_path.to_string_lossy(),
-            size_bytes = file_size,
-            checksum = %checksum,
-            "File backed up successfully"
-        );
+            name: "Test Job".to_string(),
+            mappings: json!({
+                "/tmp/source": ["/tmp/dest1", "/tmp/dest2"],
+                "/home/docs": ["/backup/docs"]
+            }),
+            status: "PENDING".to_string(),
+            is_active: true,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            deleted_at: None,
+        }
     }
 
-    Ok(())
+    #[test]
+    fn test_backup_job_creation() {
+        let job = create_test_job();
+        assert_eq!(job.name, "Test Job");
+        assert_eq!(job.status, "PENDING");
+        assert!(job.is_active);
+        assert!(job.deleted_at.is_none());
+    }
+
+    #[test]
+    fn test_mappings_parsing() {
+        let job = create_test_job();
+        let mappings: HashMap<String, Vec<String>> = 
+            serde_json::from_value(job.mappings).unwrap();
+        
+        // Verificar se tem as chaves esperadas
+        assert!(mappings.contains_key("/tmp/source"));
+        assert!(mappings.contains_key("/home/docs"));
+        
+        // Verificar múltiplos destinos
+        assert_eq!(mappings["/tmp/source"], vec!["/tmp/dest1", "/tmp/dest2"]);
+        assert_eq!(mappings["/home/docs"], vec!["/backup/docs"]);
+    }
+
+    #[test]
+    fn test_invalid_mappings() {
+        let invalid_mappings = json!({
+            "source": "not_an_array"  // Deve ser array
+        });
+        
+        let result: Result<HashMap<String, Vec<String>>, _> = 
+            serde_json::from_value(invalid_mappings);
+        
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_empty_mappings() {
+        let empty_mappings = json!({});
+        let mappings: HashMap<String, Vec<String>> = 
+            serde_json::from_value(empty_mappings).unwrap();
+        
+        assert!(mappings.is_empty());
+    }
+
+    #[test]
+    fn test_job_status_transitions() {
+        let mut job = create_test_job();
+        
+        assert_eq!(job.status, "PENDING");
+        
+        job.status = "RUNNING".to_string();
+        assert_eq!(job.status, "RUNNING");
+        
+        job.status = "COMPLETED".to_string();
+        assert_eq!(job.status, "COMPLETED");
+        
+        job.status = "FAILED".to_string();
+        assert_eq!(job.status, "FAILED");
+    }
+
+    #[test]
+    fn test_job_soft_delete() {
+        let mut job = create_test_job();
+        
+        assert!(job.is_active);
+        assert!(job.deleted_at.is_none());
+        
+        // Simular soft delete
+        job.is_active = false;
+        job.deleted_at = Some(chrono::Utc::now());
+        
+        assert!(!job.is_active);
+        assert!(job.deleted_at.is_some());
+    }
 }

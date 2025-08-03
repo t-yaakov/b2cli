@@ -4,12 +4,22 @@ B2CLI é uma plataforma de backup inteligente que evolui de uma simples ferramen
 
 ## 🚀 Características Principais
 
+### ✅ Funcionalidades Atuais (Milestone 2 Concluído)
+
 - **API REST completa** para gerenciamento de backups
-- **Backup local** de arquivos e diretórios
-- **Sistema de logs estruturado** com rotação diária
+- **Integração Rclone** para backup em nuvem (40+ provedores)
+- **Sistema de agendamento** com cron expressions
+- **Logs detalhados** de execução com métricas (arquivos, bytes, duração)
+- **Arquivamento inteligente** de logs (Hot/Warm/Cold storage)
 - **Soft delete** para segurança dos dados
-- **Catalogação automática** de arquivos com metadados
+- **Cleanup automático** de arquivos temporários
 - **Documentação interativa** via Swagger UI e Redoc
+
+### 🔄 Próximo: Restore-First Design (Milestone 3)
+- Verificação automática de restore após backup
+- Dashboard de confiabilidade: "98% dos seus backups são restauráveis"
+- Sistema .b2ignore para exclusão de arquivos
+- Configuração via TOML (Infrastructure as Code)
 
 ## 🛠️ Tecnologias
 
@@ -17,6 +27,8 @@ B2CLI é uma plataforma de backup inteligente que evolui de uma simples ferramen
 - **Axum** - Framework web async
 - **PostgreSQL** - Banco de dados
 - **SQLx** - ORM com verificação em tempo de compilação
+- **Rclone** - Backup para 40+ provedores cloud
+- **tokio-cron-scheduler** - Agendamento robusto
 - **Tracing** - Sistema de logs estruturado
 - **OpenAPI** - Documentação automática da API
 
@@ -24,6 +36,7 @@ B2CLI é uma plataforma de backup inteligente que evolui de uma simples ferramen
 
 - **Rust 1.70+** e Cargo - [Instruções de Instalação](https://www.rust-lang.org/tools/install)
 - **PostgreSQL 14+** - Banco de dados
+- **Rclone** - Para backup em nuvem ([Download](https://rclone.org/downloads/))
 - **Docker** (opcional) - Para executar o PostgreSQL via container
 
 ## 🔧 Instalação
@@ -83,57 +96,82 @@ A API estará disponível em `http://localhost:3000`
 
 ### Principais Endpoints
 
+#### Backup Jobs
 - `POST /backups` - Criar nova tarefa de backup
 - `GET /backups` - Listar tarefas de backup ativas
 - `GET /backups/{id}` - Obter detalhes de uma tarefa
+- `PUT /backups/{id}` - Atualizar uma tarefa
 - `DELETE /backups/{id}` - Deletar uma tarefa (soft delete)
-- `POST /backups/{id}/run` - Executar um backup
+- `POST /backups/{id}/run` - Executar um backup manualmente
 
-### Exemplo de Criação de Backup com Agendamento
+#### Schedules (Agendamento)
+- `POST /backups/{id}/schedule` - Criar agendamento para um backup
+- `GET /backups/{id}/schedule` - Obter agendamento do backup
+- `PUT /backups/{id}/schedule` - Atualizar agendamento
+- `DELETE /backups/{id}/schedule` - Remover agendamento
+- `GET /schedules` - Listar todos os agendamentos
+
+#### Logs de Execução
+- `GET /logs` - Listar logs de execução
+- `GET /logs/{id}` - Obter detalhes de um log
+- `GET /backups/{id}/logs` - Logs de execução de um backup específico
+- `GET /logs/stats` - Estatísticas dos logs
+
+#### Sistema de Arquivamento
+- `GET /archive/status` - Status do sistema de arquivamento
+- `GET /archive/policy` - Política de retenção atual
+- `PUT /archive/policy` - Atualizar política de retenção
+
+### Exemplo de Criação de Backup
 
 ```json
 POST /backups
 {
-  "name": "Backup de Documentos",
+  "name": "Backup para Google Drive",
   "mappings": {
-    "/home/user/Documents": [
-      "/mnt/backup/docs",
-      "/mnt/external/backup"
-    ]
-  },
-  "schedule": {
-    "name": "Daily at 5 PM",
-    "cron_expression": "0 17 * * *"
+    "/home/user/Documents": ["gdrive:backups/docs"],
+    "/home/user/Projects": ["gdrive:backups/projects"]
   }
 }
 ```
 
+### Exemplo de Agendamento
+
 ```json
-POST /backups
+POST /backups/{id}/schedule
 {
-  "name": "Backup de Documentos",
-  "mappings": {
-    "/home/user/Documents": [
-      "/mnt/backup/docs",
-      "/mnt/external/backup"
-    ]
-  }
+  "name": "Backup semanal - Domingo 10h",
+  "cron_expression": "0 0 10 * * 0",
+  "enabled": true
 }
 ```
+
+**Nota**: Cron expressions usam 6 campos: `segundo minuto hora dia mês dia_semana`
 
 ## 📁 Estrutura do Projeto
 
 ```
 b2cli/
 ├── src/
-│   ├── main.rs           # Entrada principal
-│   ├── routes/           # Handlers HTTP
-│   ├── models.rs         # Modelos de dados
-│   ├── db.rs            # Funções de banco
-│   ├── backup_worker.rs  # Lógica de backup
-│   └── logging.rs       # Configuração de logs
+│   ├── main.rs           # Entry point e configuração do servidor
+│   ├── lib.rs           # Módulos e error handling
+│   ├── models.rs        # Structs e tipos de dados
+│   ├── db.rs           # Funções de acesso ao banco
+│   ├── backup_worker.rs # Lógica principal de backup
+│   ├── logging.rs      # Configuração do sistema de logs
+│   ├── scheduler.rs    # Criação do scheduler
+│   ├── rclone.rs       # Wrapper para comandos rclone
+│   ├── archiver.rs     # Sistema de arquivamento de logs
+│   └── routes/         # HTTP handlers
+│       ├── mod.rs
+│       ├── health.rs
+│       ├── readiness.rs
+│       ├── backups.rs
+│       ├── logs.rs
+│       └── archive.rs
 ├── migrations/          # Migrations SQL
 ├── logs/               # Arquivos de log (gerado automaticamente)
+├── docs/               # Documentação do projeto
 └── Cargo.toml          # Configuração do projeto
 ```
 
@@ -168,13 +206,24 @@ Os logs são rotacionados diariamente automaticamente. Arquivos antigos são man
   - `mappings` - JSON com origem -> destinos
   - `status` - PENDING, RUNNING, COMPLETED, FAILED
   - `is_active` - Soft delete flag
-  
-- `backed_up_files` - Catálogo de arquivos copiados
+
+- `backup_schedules` - Agendamentos dos backups
+  - `id` - UUID único
   - `backup_job_id` - Referência ao job
-  - `original_path` - Caminho original
-  - `backed_up_path` - Caminho de destino
-  - `file_size` - Tamanho em bytes
-  - `checksum` - SHA256 do arquivo
+  - `name` - Nome do agendamento
+  - `cron_expression` - Expressão cron (6 campos)
+  - `enabled` - Se está ativo
+  - `last_run`, `last_status` - Última execução
+  
+- `backup_execution_logs` - Logs detalhados de execução
+  - `id` - UUID único
+  - `backup_job_id` - Referência ao job
+  - `schedule_id` - Referência ao schedule (nullable)
+  - `status` - running/completed/failed
+  - `files_transferred`, `bytes_transferred` - Métricas
+  - `duration_seconds` - Tempo de execução
+  - `rclone_command` - Comando executado
+  - `triggered_by` - manual/scheduler
 
 ### Soft Delete
 
@@ -191,7 +240,14 @@ cargo watch -x run
 ### Executar testes
 
 ```bash
-cargo test
+# Bateria completa de testes (21 testes)
+cargo test --lib --test end_to_end
+
+# Verificar que tudo funciona
+cargo test -- --nocapture
+
+# Ver guia completo
+cat docs/TESTING_GUIDE.md
 ```
 
 ### Verificar código
@@ -219,16 +275,24 @@ cargo build --release
 - Logs estruturados em JSON facilitam integração com ferramentas de monitoramento
 - Health check disponível em `/health`
 - Readiness check em `/readiness` verifica conexão com banco
+- Sistema de arquivamento com políticas Hot/Warm/Cold
+- Métricas detalhadas de execução em `/logs/stats`
 
 ## 🚀 Roadmap
 
-Veja [ROADMAP.md](ROADMAP.md) para o progresso detalhado e próximos passos, incluindo:
+Veja [ROADMAP.md](ROADMAP.md) para o progresso detalhado e próximos passos.
 
-- Suporte a provedores de nuvem (S3, B2, etc)
-- Criptografia de arquivos
-- Versionamento de backups
-- Interface web
-- Agendamento automático
+### Status Atual: Milestone 2 ✅ Concluído
+- ✅ Integração Rclone para backup em nuvem  
+- ✅ Sistema de agendamento robusto
+- ✅ Logs detalhados com métricas
+- ✅ Sistema de arquivamento inteligente
+
+### Próximo: Milestone 3 🔄 Restore-First Design
+- 🔄 Verificação automática de restore após backup
+- 🔄 Dashboard de confiabilidade 
+- 🔄 Sistema .b2ignore para exclusão de arquivos
+- 🔄 Configuração via TOML (Infrastructure as Code)
 
 ## 📄 Licença
 

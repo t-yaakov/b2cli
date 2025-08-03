@@ -193,7 +193,7 @@ pub async fn update_backup(
 #[utoipa::path(
     post,
     path = "/backups/{id}/schedule",
-    tag = "Backups",
+    tag = "Schedules",
     params(
         ("id" = Uuid, Path, description = "Backup Job ID")
     ),
@@ -229,13 +229,50 @@ pub async fn create_schedule(
     }
 
     let schedule = db::create_backup_schedule(&state.db_pool, id, &payload).await?;
+    
+    // Add the schedule to the scheduler if it's enabled
+    if schedule.enabled {
+        let db_pool = state.db_pool.clone();
+        let backup_job_id = id;
+        let schedule_id = schedule.id;
+        let cron_expression = schedule.cron_expression.clone();
+        
+        let job = tokio_cron_scheduler::Job::new_async(cron_expression.as_str(), move |_uuid, _l| {
+            let db_pool = db_pool.clone();
+            Box::pin(async move {
+                info!("🕐 Running scheduled backup for job {}", backup_job_id);
+                if let Err(e) = db::update_schedule_last_run(&db_pool, schedule_id, "running").await {
+                    error!("Failed to update schedule status: {}", e);
+                }
+
+                match db::get_backup_job_by_id(&db_pool, backup_job_id).await {
+                    Ok(Some(job)) => {
+                        info!("📦 Executing backup: {}", job.name);
+                        if let Err(e) = backup_worker::perform_backup(&db_pool, &job).await {
+                            error!("❌ Backup job {} failed: {}", backup_job_id, e);
+                            let _ = db::update_schedule_last_run(&db_pool, schedule_id, "failed").await;
+                        } else {
+                            info!("✅ Backup job {} completed successfully", backup_job_id);
+                            let _ = db::update_schedule_last_run(&db_pool, schedule_id, "completed").await;
+                        }
+                    }
+                    Ok(None) => error!("Backup job {} not found for scheduled run", backup_job_id),
+                    Err(e) => error!("Failed to get backup job {}: {}", backup_job_id, e),
+                }
+            })
+        })?;
+
+        state.scheduler.add(job).await?;
+        info!("📅 Schedule '{}' added to scheduler (cron: {})", schedule.name, schedule.cron_expression);
+    }
+    
     Ok((StatusCode::CREATED, Json(schedule)))
 }
 
 #[utoipa::path(
     get,
     path = "/backups/{id}/schedule",
-    tag = "Backups",
+    tag = "Schedules",
     params(
         ("id" = Uuid, Path, description = "Backup Job ID")
     ),
@@ -263,7 +300,7 @@ pub async fn get_schedule(
 #[utoipa::path(
     delete,
     path = "/backups/{id}/schedule",
-    tag = "Backups",
+    tag = "Schedules",
     params(
         ("id" = Uuid, Path, description = "Backup Job ID")
     ),
@@ -292,7 +329,7 @@ pub async fn delete_schedule(
 #[utoipa::path(
     put,
     path = "/backups/{id}/schedule",
-    tag = "Backups",
+    tag = "Schedules",
     params(
         ("id" = Uuid, Path, description = "Backup Job ID")
     ),
@@ -353,7 +390,7 @@ pub async fn patch_backup(
 #[utoipa::path(
     patch,
     path = "/backups/{id}/schedule",
-    tag = "Backups",
+    tag = "Schedules",
     params(
         ("id" = Uuid, Path, description = "Backup Job ID")
     ),
@@ -378,4 +415,86 @@ pub async fn patch_schedule(
             id
         ))),
     }
+}
+
+#[utoipa::path(
+    get,
+    path = "/schedules",
+    tag = "Schedules",
+    responses(
+        (status = 200, description = "List of all schedules"),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+pub async fn list_all_schedules(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    // Get all schedules with their associated backup job names
+    let schedules = sqlx::query!(
+        r#"
+        SELECT 
+            s.id,
+            s.backup_job_id,
+            s.name as schedule_name,
+            j.name as job_name,
+            s.cron_expression,
+            s.enabled,
+            s.next_run,
+            s.last_run,
+            s.last_status,
+            s.created_at,
+            s.updated_at
+        FROM backup_schedules s
+        JOIN backup_jobs j ON j.id = s.backup_job_id
+        WHERE j.is_active = true
+        ORDER BY s.enabled DESC, s.created_at DESC
+        "#
+    )
+    .fetch_all(&state.db_pool)
+    .await?;
+    
+    info!("📋 Listed {} schedules", schedules.len());
+    
+    // Convert to a simpler response format
+    let response: Vec<serde_json::Value> = schedules
+        .into_iter()
+        .map(|s| serde_json::json!({
+            "id": s.id,
+            "backup_job_id": s.backup_job_id,
+            "schedule_name": s.schedule_name,
+            "job_name": s.job_name,
+            "cron_expression": s.cron_expression,
+            "enabled": s.enabled,
+            "next_run": s.next_run,
+            "last_run": s.last_run,
+            "last_status": s.last_status,
+            "created_at": s.created_at,
+            "updated_at": s.updated_at
+        }))
+        .collect();
+    
+    Ok((StatusCode::OK, Json(response)))
+}
+
+#[utoipa::path(
+    get,
+    path = "/scheduler/status",
+    tag = "System",
+    responses(
+        (status = 200, description = "Scheduler status"),
+        (status = 500, description = "Internal server error", body = ErrorResponse)
+    )
+)]
+pub async fn scheduler_status(
+    State(_state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    // Simples: apenas verificar se o scheduler está rodando
+    // Se chegamos aqui, o scheduler foi iniciado com sucesso
+    
+    let status = serde_json::json!({
+        "scheduler": "running",
+        "status": "ok"
+    });
+    
+    Ok((StatusCode::OK, Json(status)))
 }

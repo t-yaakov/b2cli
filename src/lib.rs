@@ -14,8 +14,10 @@ pub mod backup_worker;
 pub mod db;
 pub mod logging;
 pub mod models;
+pub mod rclone;
 pub mod routes;
 pub mod scheduler;
+pub mod archiver;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -34,6 +36,7 @@ pub enum AppError {
     InternalServerError(String),
     SerdeJsonError(serde_json::Error),
     StripPrefixError(StripPrefixError),
+    RcloneError(anyhow::Error),
 }
 
 impl fmt::Display for AppError {
@@ -48,6 +51,7 @@ impl fmt::Display for AppError {
             AppError::InternalServerError(msg) => write!(f, "Internal server error: {}", msg),
             AppError::SerdeJsonError(e) => write!(f, "JSON error: {}", e),
             AppError::StripPrefixError(e) => write!(f, "Path prefix error: {}", e),
+            AppError::RcloneError(e) => write!(f, "Rclone error: {}", e),
         }
     }
 }
@@ -73,6 +77,7 @@ impl IntoResponse for AppError {
             AppError::InternalServerError(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
             AppError::SerdeJsonError(e) => (StatusCode::BAD_REQUEST, e.to_string()),
             AppError::StripPrefixError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+            AppError::RcloneError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
         };
 
         let body = Json(json!({ "error": error_message }));
@@ -113,5 +118,11 @@ impl From<serde_json::Error> for AppError {
 impl From<StripPrefixError> for AppError {
     fn from(err: StripPrefixError) -> AppError {
         AppError::StripPrefixError(err)
+    }
+}
+
+impl From<anyhow::Error> for AppError {
+    fn from(err: anyhow::Error) -> AppError {
+        AppError::RcloneError(err)
     }
 }

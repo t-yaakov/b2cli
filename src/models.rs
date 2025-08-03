@@ -94,3 +94,69 @@ pub struct UpdateBackupSchedule {
     pub cron_expression: Option<String>,
     pub enabled: Option<bool>,
 }
+
+// Backup execution logs
+#[derive(Serialize, Deserialize, ToSchema, Debug, FromRow)]
+pub struct BackupExecutionLog {
+    pub id: Uuid,
+    pub backup_job_id: Uuid,
+    pub schedule_id: Option<Uuid>,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub status: String,
+    pub rclone_command: String,
+    pub source_path: String,
+    pub destination_path: String,
+    pub rclone_config: Option<serde_json::Value>,
+    pub files_transferred: Option<i32>,
+    pub files_checked: Option<i32>,
+    pub files_deleted: Option<i32>,
+    pub bytes_transferred: Option<i64>,
+    pub transfer_rate_mbps: Option<f32>,
+    pub duration_seconds: Option<i32>,
+    pub error_count: Option<i32>,
+    pub retry_count: Option<i32>,
+    pub error_message: Option<String>,
+    pub rclone_stdout: Option<String>,
+    pub rclone_stderr: Option<String>,
+    pub rclone_log_file_path: Option<String>,
+    pub triggered_by: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct NewBackupExecutionLog {
+    pub backup_job_id: Uuid,
+    pub schedule_id: Option<Uuid>,
+    pub rclone_command: String,
+    pub source_path: String,
+    pub destination_path: String,
+    pub rclone_config: Option<serde_json::Value>,
+    pub triggered_by: Option<String>,
+}
+
+// Rclone specific models
+#[derive(Debug, Deserialize)]
+pub struct RcloneLogEntry {
+    pub level: String,
+    pub msg: String,
+    pub time: String,
+    #[serde(flatten)]
+    pub extra: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RcloneExecutionResult {
+    pub exit_code: i32,
+    pub files_transferred: i32,
+    pub files_checked: i32,
+    pub files_deleted: i32,
+    pub bytes_transferred: i64,
+    pub transfer_rate_mbps: f32,
+    pub duration_seconds: i32,
+    pub error_count: i32,
+    pub errors: Vec<String>,
+    pub stdout: String,
+    pub stderr: String,
+}

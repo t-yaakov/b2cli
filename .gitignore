@@ -15,8 +15,78 @@
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 
-# Custom
+# Custom - B2CLI specific
 .env
 .claude/
-logs/
+
+# Documentação de desenvolvimento (não é parte do produto)
 docs/
+
+# Logs temporários (gerados em runtime)
+logs/
+*.log
+*.log.*
+
+# Arquivos de teste temporários
+tests/tmp/
+tests/fixtures/large-files/
+tests/output/
+test_results_*.log
+
+# Documentação gerada (usar cargo doc)
+target/doc/
+
+# Arquivos de IDE/editores
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Arquivos específicos do sistema
+.DS_Store
+Thumbs.db
+
+# Backups temporários
+*.bak
+*.tmp
+
+# Arquivos de desenvolvimento e debug
+*.prof
+*.trace
+flamegraph.svg
+perf.data*
+
+# Arquivos de configuração local de desenvolvimento
+.env.local
+.env.development
+config.local.toml
+
+# Arquivos SQLx preparados (opcionais)
+.sqlx/
+
+# Coverage reports
+coverage/
+*.lcov
+tarpaulin-report.html
+
+# Benchmark outputs
+criterion-reports/
+target/criterion/
+
+# Arquivos de migração temporários ou de teste
+migrations/tmp_*
+migrations/*.backup
+
+# Arquivos rclone temporários
+rclone.conf.backup
+rclone_*.log
+
+# PostgreSQL dumps para testes
+*.sql.dump
+test_db_*.sql
+
+# NOTE: docs/ é IGNORADO (arquivos de desenvolvimento interno)
+# NOTE: tests/ deve SER versionado (testes são código)
+# NOTE: migrations/ deve SER versionado (schema do banco)
+# NOTE: README.md e DOCUMENTATION.md devem SER versionados (docs do produto)
