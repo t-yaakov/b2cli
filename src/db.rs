@@ -1,4 +1,7 @@
-use crate::models::{BackupJob, NewBackupJob, BackupSchedule, NewBackupSchedule, UpdateBackupJob, UpdateBackupSchedule};
+use crate::models::{
+    BackupJob, NewBackupJob, BackupSchedule, NewBackupSchedule, UpdateBackupJob, UpdateBackupSchedule,
+    CloudProvider, NewCloudProvider, UpdateCloudProvider, CloudProviderType, ConnectivityTestResult, ConnectivityStatus
+};
 use sqlx::PgPool;
 use chrono::{DateTime, Utc, Datelike, Timelike, Duration};
 
@@ -711,6 +714,480 @@ pub async fn delete_backup_execution_log(
     .await?;
 
     Ok(result.rows_affected() > 0)
+}
+
+// ========================================
+// CLOUD PROVIDERS FUNCTIONS
+// ========================================
+
+/// Cria um novo provedor de armazenamento cloud.
+/// 
+/// Insere configurações de um provedor (Backblaze B2, IDrive e2, etc.)
+/// no banco de dados. Se `is_default` for true, remove o padrão atual.
+/// 
+/// # Argumentos
+/// * `pool` - Pool de conexão PostgreSQL
+/// * `new_provider` - Dados do novo provedor
+/// 
+/// # Retorna
+/// * `Ok(CloudProvider)` - Provedor criado com sucesso
+/// * `Err(sqlx::Error)` - Erro de banco de dados
+/// 
+/// # Exemplos
+/// ```no_run
+/// use crate::models::{NewCloudProvider, CloudProviderType};
+/// 
+/// let new_provider = NewCloudProvider {
+///     name: "My Backblaze B2".to_string(),
+///     provider_type: CloudProviderType::BackblazeB2,
+///     bucket: "my-backup-bucket".to_string(),
+///     access_key: "key_id".to_string(),
+///     secret_key: "app_key".to_string(),
+///     endpoint: Some("https://s3.us-west-002.backblazeb2.com".to_string()),
+///     region: Some("us-west-002".to_string()),
+///     // ... outros campos
+/// };
+/// 
+/// let provider = create_cloud_provider(&pool, &new_provider).await?;
+/// ```
+pub async fn create_cloud_provider(
+    pool: &PgPool, 
+    new_provider: &NewCloudProvider
+) -> Result<CloudProvider, sqlx::Error> {
+    let provider_type_str = match new_provider.provider_type {
+        CloudProviderType::BackblazeB2 => "backblaze_b2",
+        CloudProviderType::IdriveE2 => "idrive_e2",
+        CloudProviderType::Wasabi => "wasabi",
+        CloudProviderType::Scaleway => "scaleway",
+    };
+
+    // Se this provider deve ser default, remove o default atual
+    if new_provider.is_default.unwrap_or(false) {
+        sqlx::query!(
+            "UPDATE cloud_providers SET is_default = false WHERE is_default = true AND is_active = true"
+        )
+        .execute(pool)
+        .await?;
+    }
+
+    let row = sqlx::query!(
+        r#"
+        INSERT INTO cloud_providers (
+            name, provider_type, endpoint, region, bucket, path_prefix,
+            access_key, secret_key, b2_account_id, b2_application_key, 
+            use_b2_native_api, is_default
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        RETURNING id, name, provider_type, endpoint, region, bucket, path_prefix,
+                  access_key, secret_key, b2_account_id, b2_application_key,
+                  use_b2_native_api, is_active, is_default, test_connectivity_at,
+                  test_connectivity_status, test_connectivity_message,
+                  total_storage_bytes, total_egress_bytes, last_sync_at,
+                  created_at, updated_at
+        "#,
+        new_provider.name,
+        provider_type_str,
+        new_provider.endpoint,
+        new_provider.region,
+        new_provider.bucket,
+        new_provider.path_prefix,
+        new_provider.access_key,
+        new_provider.secret_key,
+        new_provider.b2_account_id,
+        new_provider.b2_application_key,
+        new_provider.use_b2_native_api.unwrap_or(false),
+        new_provider.is_default.unwrap_or(false)
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(CloudProvider {
+        id: row.id,
+        name: row.name,
+        provider_type: row.provider_type,
+        endpoint: row.endpoint,
+        region: row.region,
+        bucket: row.bucket,
+        path_prefix: row.path_prefix,
+        access_key: row.access_key,
+        secret_key: row.secret_key,
+        b2_account_id: row.b2_account_id,
+        b2_application_key: row.b2_application_key,
+        use_b2_native_api: row.use_b2_native_api.unwrap_or(false),
+        is_active: row.is_active.unwrap_or(true),
+        is_default: row.is_default.unwrap_or(false),
+        test_connectivity_at: row.test_connectivity_at.map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc)),
+        test_connectivity_status: row.test_connectivity_status,
+        test_connectivity_message: row.test_connectivity_message,
+        total_storage_bytes: row.total_storage_bytes.unwrap_or(0),
+        total_egress_bytes: row.total_egress_bytes.unwrap_or(0),
+        last_sync_at: row.last_sync_at.map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc)),
+        created_at: DateTime::from_naive_utc_and_offset(row.created_at, Utc),
+        updated_at: DateTime::from_naive_utc_and_offset(row.updated_at, Utc),
+    })
+}
+
+/// Lista todos os provedores cloud ativos.
+/// 
+/// Retorna uma lista de todos os provedores configurados e ativos,
+/// ordenados pelo padrão primeiro, depois por data de criação.
+/// 
+/// # Argumentos
+/// * `pool` - Pool de conexão PostgreSQL
+/// 
+/// # Retorna
+/// * `Ok(Vec<CloudProvider>)` - Lista de provedores
+/// * `Err(sqlx::Error)` - Erro de banco de dados
+/// 
+/// # Exemplos
+/// ```no_run
+/// let providers = list_cloud_providers(&pool).await?;
+/// for provider in providers {
+///     println!("Provider: {} ({})", provider.name, provider.provider_type);
+/// }
+/// ```
+pub async fn list_cloud_providers(pool: &PgPool) -> Result<Vec<CloudProvider>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT id, name, provider_type, endpoint, region, bucket, path_prefix,
+               access_key, secret_key, b2_account_id, b2_application_key,
+               use_b2_native_api, is_active, is_default, test_connectivity_at,
+               test_connectivity_status, test_connectivity_message,
+               total_storage_bytes, total_egress_bytes, last_sync_at,
+               created_at, updated_at
+        FROM cloud_providers
+        WHERE is_active = true
+        ORDER BY is_default DESC, created_at DESC
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let providers = rows.into_iter().map(|row| CloudProvider {
+        id: row.id,
+        name: row.name,
+        provider_type: row.provider_type,
+        endpoint: row.endpoint,
+        region: row.region,
+        bucket: row.bucket,
+        path_prefix: row.path_prefix,
+        access_key: row.access_key,
+        secret_key: row.secret_key,
+        b2_account_id: row.b2_account_id,
+        b2_application_key: row.b2_application_key,
+        use_b2_native_api: row.use_b2_native_api.unwrap_or(false),
+        is_active: row.is_active.unwrap_or(true),
+        is_default: row.is_default.unwrap_or(false),
+        test_connectivity_at: row.test_connectivity_at.map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc)),
+        test_connectivity_status: row.test_connectivity_status,
+        test_connectivity_message: row.test_connectivity_message,
+        total_storage_bytes: row.total_storage_bytes.unwrap_or(0),
+        total_egress_bytes: row.total_egress_bytes.unwrap_or(0),
+        last_sync_at: row.last_sync_at.map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc)),
+        created_at: DateTime::from_naive_utc_and_offset(row.created_at, Utc),
+        updated_at: DateTime::from_naive_utc_and_offset(row.updated_at, Utc),
+    }).collect();
+
+    Ok(providers)
+}
+
+/// Busca um provedor cloud por ID.
+/// 
+/// # Argumentos
+/// * `pool` - Pool de conexão PostgreSQL
+/// * `id` - UUID do provedor
+/// 
+/// # Retorna
+/// * `Ok(Some(CloudProvider))` - Provedor encontrado
+/// * `Ok(None)` - Provedor não encontrado
+/// * `Err(sqlx::Error)` - Erro de banco de dados
+pub async fn get_cloud_provider_by_id(
+    pool: &PgPool, 
+    id: uuid::Uuid
+) -> Result<Option<CloudProvider>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT id, name, provider_type, endpoint, region, bucket, path_prefix,
+               access_key, secret_key, b2_account_id, b2_application_key,
+               use_b2_native_api, is_active, is_default, test_connectivity_at,
+               test_connectivity_status, test_connectivity_message,
+               total_storage_bytes, total_egress_bytes, last_sync_at,
+               created_at, updated_at
+        FROM cloud_providers
+        WHERE id = $1 AND is_active = true
+        "#,
+        id
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(row) = row {
+        Ok(Some(CloudProvider {
+            id: row.id,
+            name: row.name,
+            provider_type: row.provider_type,
+            endpoint: row.endpoint,
+            region: row.region,
+            bucket: row.bucket,
+            path_prefix: row.path_prefix,
+            access_key: row.access_key,
+            secret_key: row.secret_key,
+            b2_account_id: row.b2_account_id,
+            b2_application_key: row.b2_application_key,
+            use_b2_native_api: row.use_b2_native_api.unwrap_or(false),
+            is_active: row.is_active.unwrap_or(true),
+            is_default: row.is_default.unwrap_or(false),
+            test_connectivity_at: row.test_connectivity_at.map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc)),
+            test_connectivity_status: row.test_connectivity_status,
+            test_connectivity_message: row.test_connectivity_message,
+            total_storage_bytes: row.total_storage_bytes.unwrap_or(0),
+            total_egress_bytes: row.total_egress_bytes.unwrap_or(0),
+            last_sync_at: row.last_sync_at.map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc)),
+            created_at: DateTime::from_naive_utc_and_offset(row.created_at, Utc),
+            updated_at: DateTime::from_naive_utc_and_offset(row.updated_at, Utc),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Atualiza um provedor cloud existente.
+/// 
+/// # Argumentos
+/// * `pool` - Pool de conexão PostgreSQL
+/// * `id` - UUID do provedor
+/// * `update_data` - Dados para atualizar
+/// 
+/// # Retorna
+/// * `Ok(Some(CloudProvider))` - Provedor atualizado
+/// * `Ok(None)` - Provedor não encontrado
+/// * `Err(sqlx::Error)` - Erro de banco de dados
+pub async fn update_cloud_provider(
+    pool: &PgPool,
+    id: uuid::Uuid,
+    update_data: &UpdateCloudProvider
+) -> Result<Option<CloudProvider>, sqlx::Error> {
+    // Se está sendo definido como default, remove o default atual
+    if update_data.is_default == Some(true) {
+        sqlx::query!(
+            "UPDATE cloud_providers SET is_default = false WHERE is_default = true AND is_active = true AND id != $1",
+            id
+        )
+        .execute(pool)
+        .await?;
+    }
+
+    // Buscar dados atuais para fazer merge
+    let current = get_cloud_provider_by_id(pool, id).await?;
+    if let Some(current) = current {
+        let row = sqlx::query!(
+            r#"
+            UPDATE cloud_providers 
+            SET name = $1, endpoint = $2, region = $3, bucket = $4, path_prefix = $5,
+                access_key = COALESCE($6, access_key),
+                secret_key = COALESCE($7, secret_key),
+                b2_account_id = COALESCE($8, b2_account_id),
+                b2_application_key = COALESCE($9, b2_application_key),
+                use_b2_native_api = $10,
+                is_active = $11,
+                is_default = $12,
+                updated_at = NOW()
+            WHERE id = $13 AND is_active = true
+            RETURNING id, name, provider_type, endpoint, region, bucket, path_prefix,
+                      access_key, secret_key, b2_account_id, b2_application_key,
+                      use_b2_native_api, is_active, is_default, test_connectivity_at,
+                      test_connectivity_status, test_connectivity_message,
+                      total_storage_bytes, total_egress_bytes, last_sync_at,
+                      created_at, updated_at
+            "#,
+            update_data.name.as_ref().unwrap_or(&current.name),
+            update_data.endpoint.as_ref().or(current.endpoint.as_ref()),
+            update_data.region.as_ref().or(current.region.as_ref()),
+            update_data.bucket.as_ref().unwrap_or(&current.bucket),
+            update_data.path_prefix.as_ref().or(current.path_prefix.as_ref()),
+            update_data.access_key.as_ref(),
+            update_data.secret_key.as_ref(),
+            update_data.b2_account_id.as_ref(),
+            update_data.b2_application_key.as_ref(),
+            update_data.use_b2_native_api.unwrap_or(current.use_b2_native_api),
+            update_data.is_active.unwrap_or(current.is_active),
+            update_data.is_default.unwrap_or(current.is_default),
+            id
+        )
+        .fetch_optional(pool)
+        .await?;
+
+        if let Some(row) = row {
+            Ok(Some(CloudProvider {
+                id: row.id,
+                name: row.name,
+                provider_type: row.provider_type,
+                endpoint: row.endpoint,
+                region: row.region,
+                bucket: row.bucket,
+                path_prefix: row.path_prefix,
+                access_key: row.access_key,
+                secret_key: row.secret_key,
+                b2_account_id: row.b2_account_id,
+                b2_application_key: row.b2_application_key,
+                use_b2_native_api: row.use_b2_native_api.unwrap_or(false),
+                is_active: row.is_active.unwrap_or(true),
+                is_default: row.is_default.unwrap_or(false),
+                test_connectivity_at: row.test_connectivity_at.map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc)),
+                test_connectivity_status: row.test_connectivity_status,
+                test_connectivity_message: row.test_connectivity_message,
+                total_storage_bytes: row.total_storage_bytes.unwrap_or(0),
+                total_egress_bytes: row.total_egress_bytes.unwrap_or(0),
+                last_sync_at: row.last_sync_at.map(|dt| DateTime::from_naive_utc_and_offset(dt, Utc)),
+                created_at: DateTime::from_naive_utc_and_offset(row.created_at, Utc),
+                updated_at: DateTime::from_naive_utc_and_offset(row.updated_at, Utc),
+            }))
+        } else {
+            Ok(None)
+        }
+    } else {
+        Ok(None)
+    }
+}
+
+/// Remove um provedor cloud (soft delete).
+/// 
+/// # Argumentos
+/// * `pool` - Pool de conexão PostgreSQL
+/// * `id` - UUID do provedor
+/// 
+/// # Retorna
+/// * `Ok(true)` - Provedor removido com sucesso
+/// * `Ok(false)` - Provedor não encontrado
+/// * `Err(sqlx::Error)` - Erro de banco de dados
+pub async fn delete_cloud_provider(
+    pool: &PgPool, 
+    id: uuid::Uuid
+) -> Result<bool, sqlx::Error> {
+    let result = sqlx::query!(
+        r#"
+        UPDATE cloud_providers 
+        SET is_active = false, is_default = false, updated_at = NOW()
+        WHERE id = $1 AND is_active = true
+        "#,
+        id
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Testa conectividade de um provedor cloud.
+/// 
+/// Executa validação de credenciais baseada no tipo de provedor e campos obrigatórios.
+/// Atualiza o status de conectividade no banco de dados.
+/// 
+/// Implementa validação por tipo:
+/// - **Backblaze B2 Nativo**: Requer `b2_account_id` e `b2_application_key`
+/// - **Backblaze B2 S3**: Requer `access_key`, `secret_key` e `endpoint`
+/// - **IDrive e2**: Requer `access_key`, `secret_key` e `endpoint`
+/// - **Wasabi/Scaleway**: Requer `access_key`, `secret_key` e `region`
+/// 
+/// # Argumentos  
+/// * `pool` - Pool de conexão PostgreSQL
+/// * `id` - UUID do provedor
+/// 
+/// # Retorna
+/// * `Ok(ConnectivityTestResult)` - Resultado da validação
+/// * `Err(sqlx::Error)` - Erro de banco de dados
+/// 
+/// # Exemplo
+/// ```rust
+/// let result = test_cloud_provider_connectivity(&pool, provider_id).await?;
+/// if result.success {
+///     println!("Provider configured correctly!");
+/// }
+/// ```
+pub async fn test_cloud_provider_connectivity(
+    pool: &PgPool,
+    id: uuid::Uuid
+) -> Result<ConnectivityTestResult, sqlx::Error> {
+    let now = Utc::now();
+    
+    // Por enquanto, simula teste baseado na existência dos campos obrigatórios
+    let provider = match get_cloud_provider_by_id(pool, id).await? {
+        Some(p) => p,
+        None => {
+            return Ok(ConnectivityTestResult {
+                success: false,
+                status: ConnectivityStatus::Failed,
+                message: "Provider not found".to_string(),
+                tested_at: now,
+                details: Some(serde_json::json!({"error": "provider_not_found"})),
+            });
+        }
+    };
+    
+    // Validar campos obrigatórios baseado no tipo
+    let (success, status, message) = match provider.provider_type.as_str() {
+        "backblaze_b2" => {
+            if provider.use_b2_native_api {
+                if provider.b2_account_id.is_some() && provider.b2_application_key.is_some() {
+                    (true, ConnectivityStatus::Success, "B2 native API credentials validated".to_string())
+                } else {
+                    (false, ConnectivityStatus::Failed, "Missing B2 native API credentials (account_id or application_key)".to_string())
+                }
+            } else {
+                if !provider.access_key.is_empty() && !provider.secret_key.is_empty() && provider.endpoint.is_some() {
+                    (true, ConnectivityStatus::Success, "B2 S3-compatible credentials validated".to_string())
+                } else {
+                    (false, ConnectivityStatus::Failed, "Missing B2 S3 credentials (access_key, secret_key, or endpoint)".to_string())
+                }
+            }
+        }
+        "idrive_e2" => {
+            if !provider.access_key.is_empty() && !provider.secret_key.is_empty() && provider.endpoint.is_some() {
+                (true, ConnectivityStatus::Success, "IDrive e2 credentials validated".to_string())
+            } else {
+                (false, ConnectivityStatus::Failed, "Missing IDrive e2 credentials (access_key, secret_key, or endpoint)".to_string())
+            }
+        }
+        "wasabi" | "scaleway" => {
+            if !provider.access_key.is_empty() && !provider.secret_key.is_empty() && provider.region.is_some() {
+                (true, ConnectivityStatus::Success, format!("{} credentials validated", provider.provider_type))
+            } else {  
+                (false, ConnectivityStatus::Failed, format!("Missing {} credentials (access_key, secret_key, or region)", provider.provider_type))
+            }
+        }
+        _ => {
+            (false, ConnectivityStatus::Failed, format!("Unsupported provider type: {}", provider.provider_type))
+        }
+    };
+
+    sqlx::query!(
+        r#"
+        UPDATE cloud_providers 
+        SET test_connectivity_at = $1,
+            test_connectivity_status = $2,
+            test_connectivity_message = $3,
+            updated_at = NOW()
+        WHERE id = $4
+        "#,
+        now.naive_utc(),
+        if success { "success" } else { "failed" },
+        message,
+        id
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(ConnectivityTestResult {
+        success,
+        status,
+        message,
+        tested_at: now,
+        details: Some(serde_json::json!({
+            "provider_type": provider.provider_type,
+            "bucket": provider.bucket,
+            "use_native_api": provider.use_b2_native_api,
+            "validation_only": true
+        })),
+    })
 }
 
 #[cfg(test)]

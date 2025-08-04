@@ -160,3 +160,202 @@ pub struct RcloneExecutionResult {
     pub stdout: String,
     pub stderr: String,
 }
+
+// ========================================
+// CLOUD PROVIDERS MODELS
+// ========================================
+
+/// Tipos de provedores cloud suportados
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CloudProviderType {
+    /// Backblaze B2 - Focado em backup com boa relação custo-benefício
+    BackblazeB2,
+    /// IDrive e2 - Mais barato com egress gratuito
+    IdriveE2,
+    /// Wasabi - Performance alta com egress gratuito (até limites)
+    Wasabi,
+    /// Scaleway - GDPR compliant, baseado na Europa
+    Scaleway,
+}
+
+/// Status de teste de conectividade
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectivityStatus {
+    /// Conectividade testada com sucesso
+    Success,
+    /// Falha no teste de conectividade
+    Failed,
+    /// Teste pendente/nunca executado
+    Pending,
+}
+
+/// Provedor de armazenamento cloud configurado
+#[derive(Serialize, Deserialize, ToSchema, Debug, FromRow)]
+pub struct CloudProvider {
+    /// ID único do provedor
+    #[serde(skip_deserializing)]
+    pub id: Uuid,
+    /// Nome descritivo para identificação
+    pub name: String,
+    /// Tipo do provedor (backblaze_b2, idrive_e2, etc.)
+    pub provider_type: String, // Stored as string in DB, converted to/from enum
+    
+    // Configurações S3-compatible
+    /// Endpoint S3 do provedor
+    pub endpoint: Option<String>,
+    /// Região do provedor
+    pub region: Option<String>,
+    /// Nome do bucket para armazenamento
+    pub bucket: String,
+    /// Prefixo opcional no bucket (ex: "backups/")
+    pub path_prefix: Option<String>,
+    
+    // Credenciais (criptografadas)
+    /// Access key / Key ID
+    #[serde(skip_serializing)]
+    pub access_key: String,
+    /// Secret key / Application key
+    #[serde(skip_serializing)]
+    pub secret_key: String,
+    
+    // Backblaze B2 específico
+    /// Account ID para API nativa B2
+    pub b2_account_id: Option<String>,
+    /// Application key para API nativa B2
+    #[serde(skip_serializing)]
+    pub b2_application_key: Option<String>,
+    /// Se deve usar API nativa B2 ao invés de S3-compatible
+    pub use_b2_native_api: bool,
+    
+    // Status e metadados
+    /// Se o provedor está ativo
+    pub is_active: bool,
+    /// Se é o provedor padrão
+    pub is_default: bool,
+    /// Última vez que testou conectividade
+    pub test_connectivity_at: Option<DateTime<Utc>>,
+    /// Status do último teste
+    pub test_connectivity_status: Option<String>,
+    /// Mensagem do último teste
+    pub test_connectivity_message: Option<String>,
+    
+    // Métricas de uso
+    /// Total de bytes armazenados
+    pub total_storage_bytes: i64,
+    /// Total de bytes baixados (egress)
+    pub total_egress_bytes: i64,
+    /// Última sincronização
+    pub last_sync_at: Option<DateTime<Utc>>,
+    
+    #[serde(skip_deserializing)]
+    pub created_at: DateTime<Utc>,
+    #[serde(skip_deserializing)]
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Dados para criar um novo cloud provider
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct NewCloudProvider {
+    /// Nome descritivo único
+    #[schema(example = "My Backblaze B2")]
+    pub name: String,
+    /// Tipo do provedor
+    pub provider_type: CloudProviderType,
+    
+    // Configurações S3
+    /// Endpoint customizado (opcional para alguns provedores)
+    #[schema(example = "https://s3.us-west-002.backblazeb2.com")]
+    pub endpoint: Option<String>,
+    /// Região do provedor
+    #[schema(example = "us-west-002")]
+    pub region: Option<String>,
+    /// Nome do bucket
+    #[schema(example = "my-backup-bucket")]
+    pub bucket: String,
+    /// Prefixo opcional
+    #[schema(example = "backups/")]
+    pub path_prefix: Option<String>,
+    
+    // Credenciais
+    /// Access key ou Key ID
+    #[schema(example = "your-access-key-id")]
+    pub access_key: String,
+    /// Secret key ou Application key
+    #[schema(example = "your-secret-access-key")]
+    pub secret_key: String,
+    
+    // Backblaze B2 específico
+    /// Account ID para API nativa
+    pub b2_account_id: Option<String>,
+    /// Application key para API nativa
+    pub b2_application_key: Option<String>,
+    /// Usar API nativa B2
+    pub use_b2_native_api: Option<bool>,
+    
+    /// Se deve ser o provedor padrão
+    pub is_default: Option<bool>,
+    /// Testar conectividade após criar
+    pub test_connectivity: Option<bool>,
+}
+
+/// Dados para atualizar um cloud provider
+#[derive(Debug, Deserialize, ToSchema)]
+pub struct UpdateCloudProvider {
+    /// Nome descritivo
+    pub name: Option<String>,
+    /// Endpoint customizado
+    pub endpoint: Option<String>,
+    /// Região
+    pub region: Option<String>,
+    /// Nome do bucket
+    pub bucket: Option<String>,
+    /// Prefixo no bucket
+    pub path_prefix: Option<String>,
+    
+    // Credenciais (opcional para security)
+    /// Nova access key
+    pub access_key: Option<String>,
+    /// Nova secret key
+    pub secret_key: Option<String>,
+    
+    // Backblaze B2 específico
+    /// Account ID
+    pub b2_account_id: Option<String>,
+    /// Application key
+    pub b2_application_key: Option<String>,
+    /// Usar API nativa
+    pub use_b2_native_api: Option<bool>,
+    
+    /// Ativar/desativar
+    pub is_active: Option<bool>,
+    /// Tornar padrão
+    pub is_default: Option<bool>,
+}
+
+/// Resultado do teste de conectividade
+#[derive(Serialize, ToSchema)]
+pub struct ConnectivityTestResult {
+    /// Se o teste foi bem sucedido
+    pub success: bool,
+    /// Status do teste
+    pub status: ConnectivityStatus,
+    /// Mensagem descritiva
+    pub message: String,
+    /// Timestamp do teste
+    pub tested_at: DateTime<Utc>,
+    /// Detalhes adicionais (latency, etc.)
+    pub details: Option<serde_json::Value>,
+}
+
+/// Resumo de configuração do rclone para um provider
+#[derive(Serialize, ToSchema)]
+pub struct RcloneConfig {
+    /// Nome do remote no rclone
+    pub remote_name: String,
+    /// Tipo (s3 ou b2)
+    pub remote_type: String,
+    /// Configuração gerada
+    pub config_section: String,
+}

@@ -5,8 +5,8 @@ use axum::{
 use b2cli::{
     db,
     logging,
-    models::{BackupJob, NewBackupJob, BackupSchedule, NewBackupSchedule, UpdateBackupJob, UpdateBackupSchedule, BackupExecutionLog, NewBackupExecutionLog, ErrorResponse},
-    routes::{self, backups::*, health::*, readiness::*, logs::*, archive::*},
+    models::{BackupJob, NewBackupJob, BackupSchedule, NewBackupSchedule, UpdateBackupJob, UpdateBackupSchedule, BackupExecutionLog, NewBackupExecutionLog, ErrorResponse, CloudProvider, NewCloudProvider, UpdateCloudProvider, ConnectivityTestResult},
+    routes::{self, backups::*, health::*, readiness::*, logs::*, archive::*, providers::*},
     scheduler,
     AppState,
 };
@@ -48,16 +48,25 @@ use utoipa_swagger_ui::SwaggerUi;
         routes::archive::force_manual_archive,
         routes::archive::force_compress_archive,
         routes::archive::preview_archive_operation,
+        routes::providers::list_providers,
+        routes::providers::create_provider,
+        routes::providers::get_provider,
+        routes::providers::update_provider,
+        routes::providers::delete_provider,
+        routes::providers::test_provider_connectivity,
+        routes::providers::list_provider_types,
+        routes::providers::get_provider_templates,
     ),
     components(
-        schemas(ReadinessResponse, DependencyStatus, BackupJob, NewBackupJob, BackupSchedule, NewBackupSchedule, UpdateBackupJob, UpdateBackupSchedule, BackupExecutionLog, NewBackupExecutionLog, routes::logs::LogsStatsResponse, ErrorResponse)
+        schemas(ReadinessResponse, DependencyStatus, BackupJob, NewBackupJob, BackupSchedule, NewBackupSchedule, UpdateBackupJob, UpdateBackupSchedule, BackupExecutionLog, NewBackupExecutionLog, routes::logs::LogsStatsResponse, ErrorResponse, CloudProvider, NewCloudProvider, UpdateCloudProvider, ConnectivityTestResult)
     ),
     tags(
         (name = "System", description = "System health and status endpoints"),
         (name = "Backups", description = "Backup job management endpoints"),
         (name = "Schedules", description = "Schedule management endpoints"),
         (name = "Logs", description = "Backup execution logs and statistics"),
-        (name = "Archive", description = "Log archiving and compression management")
+        (name = "Log Management", description = "Log retention, archiving and lifecycle management"),
+        (name = "Cloud Providers", description = "Cloud storage provider configuration and management")
     )
 )]
 struct ApiDoc;
@@ -176,6 +185,17 @@ async fn main() {
         .route("/archive/manual", post(force_manual_archive))
         .route("/archive/compress", post(force_compress_archive))
         .route("/archive/preview", get(preview_archive_operation))
+        // Cloud Providers endpoints
+        .route("/providers", get(list_providers).post(create_provider))
+        .route("/providers/types", get(list_provider_types))
+        .route("/providers/templates", get(get_provider_templates))
+        .route(
+            "/providers/{id}",
+            get(get_provider)
+                .put(update_provider)
+                .delete(delete_provider),
+        )
+        .route("/providers/{id}/test", post(test_provider_connectivity))
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();

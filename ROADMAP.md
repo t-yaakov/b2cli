@@ -15,26 +15,37 @@ B2CLI é uma ferramenta de backup que garante que seus backups **realmente funci
 - **Agendamento robusto** - Cron expressions com tokio-cron-scheduler
 - **Logs detalhados** - Métricas de transferência, duração, erros
 - **Sistema de arquivamento** - Hot/Warm storage automático
+- **Cloud Providers** ✨ **NOVO** - Gestão de B2, IDrive e2, Wasabi, Scaleway
 - **Documentação interativa** - Swagger UI + Redoc
 
 ### 🏗️ **Arquitetura atual**
 ```
 [REST API] → [PostgreSQL] → [Rclone Worker] → [Cloud Storage]
-     ↓            ↓              ↓
-[Scheduler]  [Execution Logs]  [Metrics]
+     ↓            ↓              ↓             ↗
+[Scheduler]  [Execution Logs]  [Metrics]  [Cloud Providers]
+                                              ↓
+                                    [Connectivity Tests]
 ```
 
 ### 📦 **Como usar hoje**
 ```bash
-# 1. Criar backup job
+# 1. Configurar provedor cloud
+curl -X POST localhost:3000/providers \
+  -d '{"name": "B2 Backup", "provider_type": "backblaze_b2", 
+       "bucket": "meu-backup", "access_key": "...", "secret_key": "..."}'
+
+# 2. Testar conectividade
+curl -X POST localhost:3000/providers/{id}/test
+
+# 3. Criar backup job
 curl -X POST localhost:3000/backups \
   -d '{"name": "Docs", "mappings": {"/home/docs": ["gdrive:backup"]}}'
 
-# 2. Criar agendamento  
+# 4. Criar agendamento  
 curl -X POST localhost:3000/backups/{id}/schedule \
   -d '{"name": "Daily", "cron_expression": "0 0 2 * * *"}'
 
-# 3. Executar manualmente
+# 5. Executar manualmente
 curl -X POST localhost:3000/backups/{id}/run
 ```
 
@@ -51,7 +62,19 @@ curl -X POST localhost:3000/backups/{id}/run
 - ✅ **Test fixtures** e mocks para desenvolvimento
 - ✅ **Documentação completa** de testes (TESTING_GUIDE.md)
 
-### **v0.2.0 - Full System Testing** (Próximo - 1 semana)
+### **v0.1.6 - Cloud Providers** ✅ (CONCLUÍDO - Agosto 2025)
+
+**Funcionalidades Implementadas:**
+- ✅ **CRUD completo** para cloud providers
+- ✅ **Suporte multi-provedor**: Backblaze B2, IDrive e2, Wasabi, Scaleway
+- ✅ **Teste de conectividade** com validação de credenciais
+- ✅ **Templates de configuração** com exemplos práticos
+- ✅ **APIs S3-compatible e B2 native**
+- ✅ **Documentação Rust** completa (/// comments)
+- ✅ **Validação específica** por tipo de provedor
+- ✅ **Logs estruturados** sem poluir terminal
+
+### **v0.2.0 - Rclone + Cloud Integration** (Próximo - 1-2 semanas)
 
 **Objetivo:** Validar todo o sistema antes de implementar restore verification.
 

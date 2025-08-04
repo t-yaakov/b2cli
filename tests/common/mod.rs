@@ -8,7 +8,10 @@ use std::path::PathBuf;
 use std::fs;
 use uuid::Uuid;
 use serde_json::json;
-use b2cli::models::BackupJob;
+use b2cli::{models::BackupJob, AppState};
+use axum::Router;
+use std::sync::Arc;
+use tokio_cron_scheduler::JobScheduler;
 
 // Contador para garantir DBs únicos
 static DB_COUNTER: AtomicU32 = AtomicU32::new(0);
@@ -196,4 +199,27 @@ pub fn count_files_recursive(dir: &PathBuf) -> usize {
             }
         })
         .sum()
+}
+
+/// Cria um scheduler para testes
+pub async fn create_test_scheduler() -> JobScheduler {
+    JobScheduler::new().await.expect("Failed to create test scheduler")
+}
+
+/// Cria uma aplicação Axum para testes com todas as rotas
+pub fn create_test_app(app_state: AppState) -> Router {
+    use axum::routing::{get, post};
+    use b2cli::routes::providers::*;
+    
+    Router::new()
+        .route("/providers", get(list_providers).post(create_provider))
+        .route("/providers/types", get(list_provider_types))
+        .route(
+            "/providers/{id}",
+            get(get_provider)
+                .put(update_provider)
+                .delete(delete_provider),
+        )
+        .route("/providers/{id}/test", post(test_provider_connectivity))
+        .with_state(app_state)
 }

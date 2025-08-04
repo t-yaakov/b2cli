@@ -3,3 +3,4 @@ pub mod readiness;
 pub mod backups;
 pub mod logs;
 pub mod archive;
+pub mod providers;

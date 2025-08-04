@@ -48,7 +48,7 @@ pub enum ArchiveTarget {
 #[utoipa::path(
     get,
     path = "/archive/status",
-    tag = "Archive",
+    tag = "System",
     responses(
         (status = 200, description = "Archive system status", body = ArchiveStatus),
         (status = 500, description = "Internal server error", body = ErrorResponse)
@@ -69,7 +69,7 @@ pub async fn get_archive_status(
 #[utoipa::path(
     get,
     path = "/archive/policy",
-    tag = "Archive",
+    tag = "Log Management",
     responses(
         (status = 200, description = "Current archive policy", body = ArchivePolicy),
         (status = 500, description = "Internal server error", body = ErrorResponse)
@@ -86,7 +86,7 @@ pub async fn get_archive_policy(
 #[utoipa::path(
     put,
     path = "/archive/policy",
-    tag = "Archive",
+    tag = "Log Management",
     request_body(content = ArchivePolicyUpdate, description = "Archive policy updates"),
     responses(
         (status = 200, description = "Policy updated successfully", body = ArchivePolicy),
@@ -148,7 +148,7 @@ pub async fn update_archive_policy(
 #[utoipa::path(
     post,
     path = "/archive/manual",
-    tag = "Archive",
+    tag = "Log Management",
     params(
         ("target" = Option<String>, Query, description = "Archive target: 'warm' or 'cold' (default: warm)")
     ),
@@ -205,7 +205,7 @@ pub struct ArchiveOperationResponse {
 #[utoipa::path(
     post,
     path = "/archive/compress",
-    tag = "Archive",
+    tag = "Log Management",
     responses(
         (status = 200, description = "Compression started", body = ArchiveResult),
         (status = 500, description = "Compression failed", body = ErrorResponse)
@@ -243,7 +243,7 @@ pub struct CleanupPreviewResponse {
 #[utoipa::path(
     get,
     path = "/archive/preview",
-    tag = "Archive",
+    tag = "Log Management",
     responses(
         (status = 200, description = "Preview of what would be archived", body = CleanupPreviewResponse),
         (status = 500, description = "Internal server error", body = ErrorResponse)
