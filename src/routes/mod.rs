@@ -4,3 +4,5 @@ pub mod backups;
 pub mod logs;
 pub mod archive;
 pub mod providers;
+pub mod files;
+pub mod scan_schedules;

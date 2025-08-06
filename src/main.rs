@@ -6,7 +6,7 @@ use b2cli::{
     db,
     logging,
     models::{BackupJob, NewBackupJob, BackupSchedule, NewBackupSchedule, UpdateBackupJob, UpdateBackupSchedule, BackupExecutionLog, NewBackupExecutionLog, ErrorResponse, CloudProvider, NewCloudProvider, UpdateCloudProvider, ConnectivityTestResult},
-    routes::{self, backups::*, health::*, readiness::*, logs::*, archive::*, providers::*},
+    routes::{self, backups::*, health::*, readiness::*, logs::*, archive::*, providers::*, files::{create_scan_config, run_scan_config, list_scan_configs, list_scan_jobs, find_duplicate_files, get_scan_job_status}},
     scheduler,
     AppState,
 };
@@ -56,9 +56,15 @@ use utoipa_swagger_ui::SwaggerUi;
         routes::providers::test_provider_connectivity,
         routes::providers::list_provider_types,
         routes::providers::get_provider_templates,
+        routes::files::create_scan_config,
+        routes::files::run_scan_config,
+        routes::files::list_scan_configs,
+        routes::files::list_scan_jobs,
+        routes::files::find_duplicate_files,
+        routes::files::get_scan_job_status,
     ),
     components(
-        schemas(ReadinessResponse, DependencyStatus, BackupJob, NewBackupJob, BackupSchedule, NewBackupSchedule, UpdateBackupJob, UpdateBackupSchedule, BackupExecutionLog, NewBackupExecutionLog, routes::logs::LogsStatsResponse, ErrorResponse, CloudProvider, NewCloudProvider, UpdateCloudProvider, ConnectivityTestResult)
+        schemas(ReadinessResponse, DependencyStatus, BackupJob, NewBackupJob, BackupSchedule, NewBackupSchedule, UpdateBackupJob, UpdateBackupSchedule, BackupExecutionLog, NewBackupExecutionLog, routes::logs::LogsStatsResponse, ErrorResponse, CloudProvider, NewCloudProvider, UpdateCloudProvider, ConnectivityTestResult, routes::files::CreateScanConfig)
     ),
     tags(
         (name = "System", description = "System health and status endpoints"),
@@ -66,7 +72,8 @@ use utoipa_swagger_ui::SwaggerUi;
         (name = "Schedules", description = "Schedule management endpoints"),
         (name = "Logs", description = "Backup execution logs and statistics"),
         (name = "Log Management", description = "Log retention, archiving and lifecycle management"),
-        (name = "Cloud Providers", description = "Cloud storage provider configuration and management")
+        (name = "Cloud Providers", description = "Cloud storage provider configuration and management"),
+        (name = "File Catalog", description = "File scanning, cataloging and intelligent search")
     )
 )]
 struct ApiDoc;
@@ -77,7 +84,7 @@ async fn main() {
     dotenvy::dotenv().expect("Failed to read .env file");
 
     // Initialize logging
-    logging::init_logging().expect("Failed to initialize logging");
+    let _guard = logging::init_logging().expect("Failed to initialize logging");
 
     let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
 
@@ -196,6 +203,12 @@ async fn main() {
                 .delete(delete_provider),
         )
         .route("/providers/{id}/test", post(test_provider_connectivity))
+        // File Catalog endpoints  
+        .route("/files/scan", post(create_scan_config).get(list_scan_configs))
+        .route("/files/scan/jobs", get(list_scan_jobs))
+        .route("/files/scan/{id}/run", post(run_scan_config))
+        .route("/files/scan/{id}", get(get_scan_job_status))
+        .route("/files/duplicates", get(find_duplicate_files))
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();

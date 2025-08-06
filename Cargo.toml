@@ -23,6 +23,17 @@ tracing-appender = "0.2"
 tokio-cron-scheduler = "0.14.0"
 cron = "0.12"
 flate2 = "1.0.35"
+# File scanning and cataloging
+async-recursion = "1.1"
+notify = "7.0"
+regex = "1.11"
+toml = "0.8"
+# Encryption
+aes-gcm = "0.10"
+argon2 = "0.5"
+base64 = "0.22"
+# Search (offline)
+tantivy = "0.22"
 
 [dev-dependencies]
 tower = "0.5"

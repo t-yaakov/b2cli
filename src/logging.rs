@@ -2,13 +2,13 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 use tracing_appender::rolling;
 use std::io;
 
-pub fn init_logging() -> anyhow::Result<()> {
+pub fn init_logging() -> anyhow::Result<tracing_appender::non_blocking::WorkerGuard> {
     // Create logs directory if it doesn't exist
     std::fs::create_dir_all("logs")?;
     
     // Create a file appender that rotates daily
     let file_appender = rolling::daily("logs", "b2cli.log");
-    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     
     // Create formatters
     let file_layer = fmt::layer()
@@ -31,7 +31,9 @@ pub fn init_logging() -> anyhow::Result<()> {
     let file_filter = EnvFilter::try_from_env("FILE_LOG")
         .unwrap_or_else(|_| EnvFilter::new("debug"))
         .add_directive("sqlx=info".parse()?)
-        .add_directive("b2cli=trace".parse()?);
+        .add_directive("b2cli=trace".parse()?)
+        .add_directive("b2cli::file_scanner=trace".parse()?)
+        .add_directive("b2cli::routes=trace".parse()?);
     
     // Console gets only info and above
     let console_filter = EnvFilter::try_from_default_env()
@@ -49,5 +51,5 @@ pub fn init_logging() -> anyhow::Result<()> {
     tracing::info!("B2CLI logging initialized");
     tracing::info!("Log files are stored in ./logs directory");
     
-    Ok(())
+    Ok(guard)
 }

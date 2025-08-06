@@ -1,6 +1,7 @@
 use crate::AppError;
 use crate::models::{BackupJob, NewBackupExecutionLog};
 use crate::{db, rclone::RcloneWrapper};
+use crate::file_scanner::{FileScanner, ScanConfig};
 use sqlx::PgPool;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -68,8 +69,51 @@ pub async fn perform_backup_with_schedule(pool: &PgPool, job: &BackupJob, schedu
     let rclone = RcloneWrapper::new(Default::default(), Some(PathBuf::from("./logs")));
     
     let mut all_success = true;
+    let mut scan_job_ids = Vec::new();
 
     for (source_path, destination_paths) in mappings {
+        // NOVO: Escanear origem ANTES do backup para catalogar arquivos
+        tracing::info!(
+            job_id = %job.id,
+            source = %source_path,
+            "Catalogando arquivos antes do backup"
+        );
+        
+        let scan_config = ScanConfig {
+            root_path: PathBuf::from(&source_path),
+            recursive: true,
+            ..Default::default()
+        };
+        
+        let mut scanner = FileScanner::new(pool.clone(), scan_config);
+        
+        // Executar scan e aguardar conclusão
+        match scanner.start_scan().await {
+            Ok(scan_job_id) => {
+                tracing::info!(
+                    job_id = %job.id,
+                    scan_job_id = %scan_job_id,
+                    "Catalogação concluída com sucesso"
+                );
+                scan_job_ids.push(scan_job_id);
+                
+                // Atualizar scan_job com referência ao backup
+                sqlx::query!(
+                    "UPDATE scan_jobs SET backup_job_id = $1, scan_type = 'backup_pre' WHERE id = $2",
+                    job.id,
+                    scan_job_id
+                )
+                .execute(pool)
+                .await?;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    job_id = %job.id,
+                    error = %e,
+                    "Falha na catalogação, continuando com backup"
+                );
+            }
+        }
         for destination in destination_paths {
             // Criar log de execução
             let triggered_by = if schedule_id.is_some() { "scheduler" } else { "manual" };
@@ -95,6 +139,38 @@ pub async fn perform_backup_with_schedule(pool: &PgPool, job: &BackupJob, schedu
                         files_transferred = result.files_transferred,
                         "Backup completed for path {} -> {}", source_path, destination
                     );
+                    
+                    // NOVO: Marcar arquivos como backupeados
+                    if !scan_job_ids.is_empty() {
+                        let update_result = sqlx::query!(
+                            r#"
+                            UPDATE file_catalog 
+                            SET 
+                                last_backup_at = CURRENT_TIMESTAMP,
+                                backup_count = backup_count + 1,
+                                backup_job_ids = array_append(backup_job_ids, $1)
+                            WHERE file_path LIKE $2 || '%'
+                              AND is_active = true
+                            "#,
+                            job.id,
+                            source_path
+                        )
+                        .execute(pool)
+                        .await;
+                        
+                        if let Err(e) = update_result {
+                            tracing::warn!(
+                                job_id = %job.id,
+                                error = %e,
+                                "Falha ao marcar arquivos como backupeados"
+                            );
+                        } else {
+                            tracing::info!(
+                                job_id = %job.id,
+                                "Arquivos marcados como backupeados"
+                            );
+                        }
+                    }
                 }
                 Err(e) => {
                     all_success = false;

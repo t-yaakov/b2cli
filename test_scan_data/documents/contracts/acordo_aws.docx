@@ -1,0 +1,37 @@
+ACORDO DE NÍVEL DE SERVIÇO - AWS
+================================
+
+Cliente: Empresa Teste Ltda
+Provedor: Amazon Web Services
+
+RESUMO EXECUTIVO:
+- SLA de 99.9% de disponibilidade
+- Créditos por indisponibilidade
+- Suporte Enterprise
+- Monitoramento 24/7
+
+SERVIÇOS CONTRATADOS:
+✓ EC2 Instances (50 instâncias)
+✓ RDS PostgreSQL (cluster HA)
+✓ S3 Storage (100TB)
+✓ CloudFront CDN
+✓ Route 53 DNS
+✓ VPC com múltiplas zonas
+
+VALORES MENSAIS:
+- Compute: $8,500
+- Storage: $2,300
+- Networking: $1,200
+- Support: $5,000
+TOTAL: $17,000/mês
+
+PENALIDADES:
+- < 99.9%: 10% de crédito
+- < 99.5%: 25% de crédito
+- < 99.0%: 50% de crédito
+
+Data de assinatura: 01/01/2025
+Vigência: 24 meses
+Renovação: Automática
+
+--- CONFIDENCIAL ---

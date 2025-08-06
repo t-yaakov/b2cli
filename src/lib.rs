@@ -18,6 +18,9 @@ pub mod rclone;
 pub mod routes;
 pub mod scheduler;
 pub mod archiver;
+pub mod file_scanner;
+pub mod config_manager;
+pub mod crypto;
 
 #[derive(Clone)]
 pub struct AppState {
